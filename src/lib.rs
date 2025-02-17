@@ -208,10 +208,10 @@ extern crate alloc;
 // So our macros can refer to these.
 #[doc(hidden)]
 pub mod __impl {
-    #[cfg(feature = "serde")]
-    pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub use core::convert::From;
     pub use core::result::Result;
+    #[cfg(feature = "serde")]
+    pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
 }
 
 pub mod basic;
@@ -319,8 +319,7 @@ impl Default for KeyData {
     }
 }
 
-impl Hash for KeyData
-{
+impl Hash for KeyData {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // A derived Hash impl would call write_u32 twice. We call write_u64
         // once, which is beneficial if the hasher implements write_u64
@@ -519,18 +518,33 @@ new_key_type! {
 }
 
 // Serialization with serde.
-#[cfg(feature = "serde")]
+#[cfg(any(feature = "serde", feature = "borsh"))]
 mod serialize {
+    #[cfg(feature = "borsh")]
+    use borsh::io::{Read, Write};
+    #[cfg(feature = "unstable__borsh_schema")]
+    use borsh::BorshSchema;
+    #[cfg(feature = "borsh")]
+    use borsh::{BorshDeserialize, BorshSerialize};
+    #[cfg(feature = "unstable__borsh_async")]
+    use borsh::{BorshDeserializeAsync, BorshSerializeAsync};
+    #[cfg(feature = "serde")]
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     use super::*;
 
-    #[derive(Serialize, Deserialize)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
+    #[cfg_attr(
+        feature = "unstable__borsh_async",
+        derive(BorshSerializeAsync, BorshDeserializeAsync)
+    )]
     pub struct SerKey {
         idx: u32,
         version: u32,
     }
 
+    #[cfg(feature = "serde")]
     impl Serialize for KeyData {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
@@ -540,10 +554,11 @@ mod serialize {
                 idx: self.idx,
                 version: self.version.get(),
             };
-            ser_key.serialize(serializer)
+            Serialize::serialize(&ser_key, serializer)
         }
     }
 
+    #[cfg(feature = "serde")]
     impl<'de> Deserialize<'de> for KeyData {
         fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
         where
@@ -552,12 +567,76 @@ mod serialize {
             let mut ser_key: SerKey = Deserialize::deserialize(deserializer)?;
 
             // Ensure a.is_null() && b.is_null() implies a == b.
-            if ser_key.idx == core::u32::MAX {
+            if ser_key.idx == u32::MAX {
                 ser_key.version = 1;
             }
 
             ser_key.version |= 1; // Ensure version is odd.
             Ok(Self::new(ser_key.idx, ser_key.version))
+        }
+    }
+
+    #[cfg(feature = "borsh")]
+    impl BorshSerialize for KeyData {
+        fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+            let ser_key = SerKey {
+                idx: self.idx,
+                version: self.version.get(),
+            };
+            BorshSerialize::serialize(&ser_key, writer)
+        }
+    }
+
+    #[cfg(feature = "borsh")]
+    impl BorshDeserialize for KeyData {
+        fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+            let mut ser_key: SerKey = BorshDeserialize::deserialize_reader(reader)?;
+
+            // Ensure a.is_null() && b.is_null() implies a == b.
+            if ser_key.idx == u32::MAX {
+                ser_key.version = 1;
+            }
+
+            ser_key.version |= 1; // Ensure version is odd.
+            Ok(Self::new(ser_key.idx, ser_key.version))
+        }
+    }
+
+    #[cfg(feature = "unstable__borsh_schema")]
+    impl BorshSchema for KeyData {
+        fn add_definitions_recursively(
+            definitions: &mut borsh::__private::maybestd::collections::BTreeMap<
+                borsh::schema::Declaration,
+                borsh::schema::Definition,
+            >,
+        ) {
+            let fields = borsh::schema::Fields::NamedFields(vec![
+                (
+                    "idx".to_string(),
+                    <u32 as borsh::BorshSchema>::declaration(),
+                ),
+                (
+                    "version".to_string(),
+                    <NonZeroU32 as borsh::BorshSchema>::declaration(),
+                ),
+            ]);
+            let definition = borsh::schema::Definition::Struct { fields };
+            let no_recursion_flag = definitions
+                .get(&<Self as borsh::BorshSchema>::declaration())
+                .is_none();
+            borsh::schema::add_definition(
+                <Self as borsh::BorshSchema>::declaration(),
+                definition,
+                definitions,
+            );
+            if no_recursion_flag {
+                <u32 as borsh::BorshSchema>::add_definitions_recursively(definitions);
+                <NonZeroU32 as borsh::BorshSchema>::add_definitions_recursively(definitions);
+            }
+        }
+
+        fn declaration() -> borsh::schema::Declaration {
+            "KeyData".to_string()
         }
     }
 }
@@ -572,12 +651,12 @@ mod tests {
         use super::new_key_type;
 
         // Clobber namespace with clashing names - should still work.
-        trait Serialize { }
-        trait Deserialize { }
-        trait Serializer { }
-        trait Deserializer { }
-        trait Key { }
-        trait From { }
+        trait Serialize {}
+        trait Deserialize {}
+        trait Serializer {}
+        trait Deserializer {}
+        trait Key {}
+        trait From {}
         struct Result;
         struct KeyData;
 
